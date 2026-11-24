@@ -25,6 +25,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     private var failureShown = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installEditingMenu()
         do { store = try NoteStore() } catch { alert("Couldn’t load your notes", error.localizedDescription) }
         sourcePID = externalApp()?.processIdentifier
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -57,6 +58,33 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate(); hotkeys.stop()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showNotes()
+        return true
+    }
+
+    private func installEditingMenu() {
+        // Standard responder-chain commands also supply keyboard shortcuts while
+        // editing a note in this accessory app.
+        let main = NSMenu()
+        let application = NSMenuItem(); application.submenu = NSMenu(title: "Stick")
+        application.submenu?.addItem(withTitle: "Quit Stick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        main.addItem(application)
+        let edit = NSMenuItem(); edit.submenu = NSMenu(title: "Edit")
+        for (title, action, key) in [
+            ("Undo", Selector(("undo:")), "z"),
+            ("Cut", #selector(NSText.cut(_:)), "x"),
+            ("Copy", #selector(NSText.copy(_:)), "c"),
+            ("Paste", #selector(NSText.paste(_:)), "v"),
+            ("Select All", #selector(NSText.selectAll(_:)), "a")
+        ] { edit.submenu?.addItem(withTitle: title, action: action, keyEquivalent: key) }
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.submenu?.insertItem(redo, at: 1)
+        main.addItem(edit)
+        NSApp.mainMenu = main
     }
 
     private func externalApp() -> NSRunningApplication? {

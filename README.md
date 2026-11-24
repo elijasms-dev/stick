@@ -32,7 +32,7 @@ The menu bar pin provides Add Note, Show/Hide Pins, All Notes, and Getting Start
 
 Uses macOS Accessibility only; no editor or browser plugins. Initial diagnostic checks on this development Mac found usable text and scrolling geometry in TextEdit 1.21, Safari 27.2 (ordinary HTML), and VS Code 1.147.0 with Screen Reader Optimized mode active.
 
-TextEdit exposes conventional text ranges. Safari exposes selections through native text markers; v1 supports selections within one text element. VS Code may expose usable geometry on a child text node even when the editor itself returns empty bounds. Stick does not change accessibility settings in other apps.
+TextEdit exposes conventional text ranges. Safari exposes selections through native text markers; v1 supports selections within one text element. VS Code may expose usable geometry on a child text node even when the editor itself returns empty bounds. Native editor scans stay inside the focused text editor, and VS Code's editor label must match the active file; focusing another panel hides pins. Stick does not change accessibility settings in other apps.
 
 This is an early local build. Large documents, virtualized content, code folding, wrapped code, complex web editors, and text split across multiple elements may be unsupported. The saved quote and its surrounding excerpt must still match; edits inside or near the quote can need reattachment. If an app exposes no stable document URL, Stick falls back to its window title, which is less durable. No claim of universal app compatibility is made.
 

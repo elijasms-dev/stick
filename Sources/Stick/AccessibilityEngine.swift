@@ -26,7 +26,7 @@ enum PinLocation {
 }
 
 enum AccessibilityFailure: LocalizedError {
-    case permission, noWindow, noSelection, unsupportedSelection, scanIncomplete, ambiguousSelection
+    case permission, noWindow, noSelection, unsupportedSelection, scanIncomplete, ambiguousSelection, documentNotFocused
     var errorDescription: String? {
         switch self {
         case .permission: return "Allow Stick in System Settings → Privacy & Security → Accessibility, then try again."
@@ -35,6 +35,7 @@ enum AccessibilityFailure: LocalizedError {
         case .unsupportedSelection: return "This app does not expose a usable position for the selected text. Try a shorter selection or another app."
         case .scanIncomplete: return "This document took too long to inspect. Try again with the target text visible."
         case .ambiguousSelection: return "That text appears in several places. Select a longer, more distinctive passage."
+        case .documentNotFocused: return "Click in the document text first. Stick does not place document pins in search fields, terminals, or other panels."
         }
     }
 }
@@ -202,7 +203,41 @@ final class AccessibilityEngine {
         let documentID = file ?? (isBrowserPage ? webURL : nil) ?? "window-title:\(title)"
         let context = DocumentContext(appBundleID: bundleID, appName: running.localizedName ?? bundleID, documentID: documentID,
                                       documentTitle: title, pid: pid, windowFrame: frame)
-        return Session(app: app, window: window, content: isBrowserPage ? web! : window, context: context, browser: isBrowserPage)
+        let content: AXUIElement
+        if isBrowserPage { content = web! }
+        else {
+            guard let focused = element(read(app, "AXFocusedUIElement")),
+                  let editor = focusedTextEditor(focused, window: window) else {
+                throw exhausted ? AccessibilityFailure.scanIncomplete : AccessibilityFailure.documentNotFocused
+            }
+            // VS Code gives the whole window the active file URL. Its terminal and
+            // other panes can also expose text areas, so check the editor's document
+            // label before accepting it as a source for that file.
+            if bundleID == "com.microsoft.VSCode" || bundleID == "com.microsoft.VSCodeInsiders" || bundleID == "com.todesktop.230313mzl4w4u92" {
+                let filename = file.flatMap(URL.init(string:))?.lastPathComponent
+                let description = read(editor, "AXDescription") as? String ?? ""
+                let editorTitle = read(editor, "AXTitle") as? String ?? ""
+                guard let filename, !filename.isEmpty,
+                      description == filename || editorTitle == filename || description.hasPrefix(filename + ",") else {
+                    throw AccessibilityFailure.documentNotFocused
+                }
+            }
+            content = editor
+        }
+        return Session(app: app, window: window, content: content, context: context, browser: isBrowserPage)
+    }
+
+    /// Stay within the focused text editor. A sibling editor may contain the same
+    /// quote, but belongs to a different document even when sharing one window.
+    private func focusedTextEditor(_ focused: AXUIElement, window: AXUIElement) -> AXUIElement? {
+        var current: AXUIElement? = focused
+        for _ in 0..<32 {
+            guard let node = current, allowed(), !CFEqual(node, window) else { return nil }
+            if read(node, "AXSubrole") as? String == "AXSecureTextField" { return nil }
+            if read(node, "AXRole") as? String == "AXTextArea" { return node }
+            current = element(read(node, "AXParent"))
+        }
+        return nil
     }
     private func firstWebArea(_ root: AXUIElement) -> AXUIElement? {
         var queue: [(AXUIElement, Int)] = [(root, 0)]
@@ -253,8 +288,11 @@ final class AccessibilityEngine {
         var parent = element(read(session.content, "AXParent"))
         for _ in 0..<24 {
             guard let current = parent, !CFEqual(current, session.window), allowed() else { break }
-            if read(current, "AXRole") as? String == "AXScrollArea", let viewport = frame(current) {
-                contentClip = contentClip.intersection(viewport)
+            let role = read(current, "AXRole") as? String ?? ""
+            if let viewport = frame(current) {
+                if role == "AXScrollArea" || (role == "AXGroup" && viewport.width >= 80 && viewport.height >= 80) {
+                    contentClip = contentClip.intersection(viewport)
+                }
             }
             parent = element(read(current, "AXParent"))
         }
