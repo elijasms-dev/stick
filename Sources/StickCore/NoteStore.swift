@@ -54,6 +54,17 @@ public final class NoteStore {
         try persist(notes.filter { $0.id != id })
     }
 
+    /// Update attachment context without changing note order or overwriting newer edits.
+    public func updateAnchors(_ updates: [UUID: TextAnchor], expected: [UUID: TextAnchor]) throws {
+        let next = notes.map { note -> StickNote in
+            guard let anchor = updates[note.id], note.anchor == expected[note.id] else { return note }
+            var updated = note
+            updated.anchor = anchor
+            return updated
+        }
+        if next != notes { try persist(next) }
+    }
+
     private static func sorted(_ notes: [StickNote]) -> [StickNote] {
         notes.sorted {
             if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }

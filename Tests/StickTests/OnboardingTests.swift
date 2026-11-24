@@ -87,6 +87,29 @@ final class OnboardingTests: XCTestCase {
         }
     }
 
+    func testSettingsActionShowsNewlyGrantedStateBeforeFinishing() async {
+        await MainActor.run {
+            let permission = PermissionFixture()
+            let controller = permission.makeController()
+            defer { controller.close() }
+            controller.performPrimaryAction()
+            XCTAssertEqual(controller.stage, .waiting)
+
+            // The user clicked "Open System Settings", but access changed before
+            // the action ran. Show the ready instructions before accepting Finish.
+            permission.hasAccess = true
+            controller.performPrimaryAction()
+
+            XCTAssertEqual(controller.stage, .ready)
+            XCTAssertEqual(permission.finishes, 0)
+            XCTAssertEqual(permission.settingsOpens, 0)
+            XCTAssertEqual(permission.requests, 1)
+
+            controller.performPrimaryAction()
+            XCTAssertEqual(permission.finishes, 1)
+        }
+    }
+
     func testContinueRechecksRevokedAccessInsteadOfCompletingOrPrompting() async {
         await MainActor.run {
             let permission = PermissionFixture()

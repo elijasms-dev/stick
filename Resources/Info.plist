@@ -5,6 +5,7 @@
 <key>CFBundleIdentifier</key><string>dev.elijasms.stick</string>
 <key>CFBundleName</key><string>Stick</string>
 <key>CFBundleDisplayName</key><string>Stick</string>
+<key>CFBundleIconFile</key><string>Stick.icns</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundlePackageType</key><string>APPL</string>

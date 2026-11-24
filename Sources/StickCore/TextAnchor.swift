@@ -6,12 +6,19 @@ public struct TextAnchor: Codable, Equatable, Sendable {
     public var prefix: String
     public var suffix: String
     public var originalOffset: Int
+    /// Persist an observed invalidation so reopening Stick cannot choose a survivor.
+    public var requiresReattachment: Bool? = nil
 
     public init(quote: String, prefix: String, suffix: String, originalOffset: Int) {
         self.quote = quote
         self.prefix = prefix
         self.suffix = suffix
         self.originalOffset = originalOffset
+    }
+
+    /// The persisted invalidation flag must not break verified same-session undo.
+    public func hasSameAttachment(as other: TextAnchor) -> Bool {
+        quote == other.quote && prefix == other.prefix && suffix == other.suffix && originalOffset == other.originalOffset
     }
 
     public static func capture(text: String, range: NSRange) -> TextAnchor? {
@@ -45,33 +52,30 @@ public enum AnchorMatcher {
     /// Finds the original quote with its saved context, even if only one copy remains.
     /// The old offset is intentionally never used to break a tie.
     public static func locate(_ anchor: TextAnchor, in text: String) -> AnchorMatch {
-        guard !anchor.quote.isEmpty else { return .missing }
+        guard !anchor.quote.isEmpty, anchor.requiresReattachment != true else { return .missing }
         let source = text as NSString
         let quoteLength = (anchor.quote as NSString).length
         var searchStart = 0
-        var candidates: [NSRange] = []
+        var match: NSRange?
+        let hasContext = !anchor.prefix.isEmpty || !anchor.suffix.isEmpty
+        let prefixLength = (anchor.prefix as NSString).length
+        let suffixLength = (anchor.suffix as NSString).length
         while searchStart <= source.length - quoteLength {
             let searchRange = NSRange(location: searchStart, length: source.length - searchStart)
             let range = source.range(of: anchor.quote, options: .literal, range: searchRange)
             guard range.location != NSNotFound else { break }
-            candidates.append(range)
             // Include overlapping occurrences rather than silently selecting one.
             searchStart = range.location + 1
+            if hasContext {
+                guard range.location >= prefixLength,
+                      source.length - NSMaxRange(range) >= suffixLength else { continue }
+                let before = source.substring(with: NSRange(location: range.location - prefixLength, length: prefixLength))
+                let after = source.substring(with: NSRange(location: NSMaxRange(range), length: suffixLength))
+                guard before == anchor.prefix && after == anchor.suffix else { continue }
+            }
+            if match != nil { return .ambiguous }
+            match = range
         }
-        guard !candidates.isEmpty else { return .missing }
-        guard !anchor.prefix.isEmpty || !anchor.suffix.isEmpty else {
-            return candidates.count == 1 ? .found(candidates[0]) : .ambiguous
-        }
-        let prefixLength = (anchor.prefix as NSString).length
-        let suffixLength = (anchor.suffix as NSString).length
-        let contextual = candidates.filter { range in
-            guard range.location >= prefixLength,
-                  source.length - NSMaxRange(range) >= suffixLength else { return false }
-            let before = source.substring(with: NSRange(location: range.location - prefixLength, length: prefixLength))
-            let after = source.substring(with: NSRange(location: NSMaxRange(range), length: suffixLength))
-            return before == anchor.prefix && after == anchor.suffix
-        }
-        if contextual.count == 1 { return .found(contextual[0]) }
-        return candidates.count == 1 ? .missing : .ambiguous
+        return match.map(AnchorMatch.found) ?? .missing
     }
 }

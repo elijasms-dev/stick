@@ -40,3 +40,19 @@ All 19 tests passed: the 13 anchor/store tests plus six AppKit onboarding tests 
 ![Permission onboarding in light appearance](images/onboarding-light.png)
 
 ![Permission onboarding in dark appearance](images/onboarding-dark.png)
+
+## Responsiveness and tracking
+
+On 24 November 2026, used a fresh `stick-smoothing-test.txt` fixture without overwriting the previous sample. The running development build passed:
+
+- Control–Option–N created two different notes, and both bodies autosaved.
+- Control–Option–P revealed two separate pin windows.
+- Both pins stayed vertically aligned to their first text line after scrolling and inserting a line immediately before the first quote.
+- The refreshed surrounding context persisted; each pin opened its own body and quote, with Escape returning to TextEdit.
+- Restarting Stick preserved both notes and their updated anchors. One harness attempt lost foreground focus; a scoped retry passed.
+- Search updated immediately and Return opened the matching note with keyboard focus.
+- The permission window detected enabled access without restarting; the ready screen, notes list, and editor were visually inspected in dark appearance.
+
+The final source also fixes horizontal drift by using a stable editor gutter and persists observed invalidation so a deleted quote cannot transfer to a surviving duplicate after restart. All 46 automated tests and the release build passed, including legacy note decoding, persistent invalidation, live undo, pin geometry, save failures, and keyboard navigation. No compiler concurrency warnings remained.
+
+Live validation of the final gutter revision is pending the current build's Accessibility entry refresh. These are still ad-hoc development builds; stable signing was not configured. This pass does not extend the Safari or VS Code coverage above.
