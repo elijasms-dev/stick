@@ -58,3 +58,13 @@ The final source also fixes horizontal drift by using a stable editor gutter and
 The final build's Accessibility entry was refreshed and its setup window detected access. The subsequent live demo completed the final gutter check: both independent pins opened their correct notes, aligned with their lines while scrolling, and followed an inserted line immediately before the first quote. Both retained the same gutter X position when the first passage's indentation changed. GitHub's checks passed for the tested source.
 
 These are still ad-hoc development builds; stable signing was not configured. This pass does not extend the Safari or VS Code coverage above.
+
+## Customizable shortcuts
+
+Validated the packaged app on 24 November 2026. Settings opens with Command–comma and provides separate modifier/key choices for adding notes and showing or hiding pins. Choosing Command–Space and pressing Apply displayed the macOS shortcut conflict inline. The rejected draft remained editable, and the previously saved configuration was retained.
+
+Saved Control–Option–Command–J for adding notes and Control–Option–Command–K for toggling pins. The ready screen immediately displayed both choices. In the existing TextEdit fixture, the custom toggle hid and revealed the two independent pins; the custom add command created a new note for the selected test passage and autosaved its distinct test body. Escape returned focus to TextEdit. After restarting Stick, Settings still showed both saved combinations and the custom toggle again revealed and hid the pins. The tested pair was left configured locally, with Settings open.
+
+The 64 automated tests and release build passed. Shortcut tests cover validation, preferences, duplicate assignments, system-reserved keys, failed-registration rollback, swapping bindings, stale events, draft cancellation, and updated hints. The running dark-mode Settings layout and conflict message were inspected; an offscreen AppKit layout check also confirmed that a long error fits without compressing the key selectors.
+
+Conflict detection is deliberately limited: macOS symbolic shortcuts and reported registration conflicts can be checked, but some app shortcuts are not discoverable. A temporary two-process registration check confirmed that an exclusive incumbent reports a conflict, while an existing nonexclusive registration can accept the same combination without reporting one. Stick does not claim to detect every shortcut collision.

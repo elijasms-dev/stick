@@ -339,13 +339,16 @@ final class NotesListController: NSWindowController, NSTableViewDataSource, NSTa
     private var hasSavedFrame = false
     private var needsReload = false
     private var renderedUnplaced = Set<UUID>()
+    private var addNoteShortcut: KeyboardShortcut
 
     init(onOpen: @escaping (UUID) -> Void, onReveal: @escaping (UUID) -> Void,
-         onReattach: @escaping (UUID) -> Void, onDelete: @escaping (UUID) -> Void) {
+         onReattach: @escaping (UUID) -> Void, onDelete: @escaping (UUID) -> Void,
+         addNoteShortcut: KeyboardShortcut = ShortcutConfiguration.defaults.addNote) {
         self.onOpen = onOpen
         self.onReveal = onReveal
         self.onReattach = onReattach
         self.onDelete = onDelete
+        self.addNoteShortcut = addNoteShortcut
         let window = EscapeWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 520),
                                   styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Stick — All notes"
@@ -461,6 +464,13 @@ final class NotesListController: NSWindowController, NSTableViewDataSource, NSTa
         if window?.isVisible == true { reload() }
     }
 
+    func updateShortcut(_ shortcut: KeyboardShortcut) {
+        guard shortcut != addNoteShortcut else { return }
+        addNoteShortcut = shortcut
+        needsReload = true
+        if window?.isVisible == true { reload() }
+    }
+
     func present() {
         if needsReload { reload() }
         NSApp.activate(ignoringOtherApps: true)
@@ -509,7 +519,7 @@ final class NotesListController: NSWindowController, NSTableViewDataSource, NSTa
             ? "No locations to fix" : "Leave a note where you are"
         emptyLabel.stringValue = !query.isEmpty ? "Try a word from your note, selected text, document, or app." : filter.selectedSegment == 1
             ? "No missing locations found in the documents Stick has checked."
-            : "Select text in another app, then press Control–Option–N. Your notes will appear here."
+            : "Select text in another app, then press \(addNoteShortcut.spokenString). Your notes will appear here."
         setActionState()
     }
 

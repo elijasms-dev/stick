@@ -2,8 +2,12 @@
 
 A small native Mac menu bar app for leaving private notes on selected text in other apps.
 
-Select text → **Control–Option–N** → write a note → **Escape** to return to work.
-Press **Control–Option–P** to toggle pins in the current document. Click a pin to edit its note.
+Select text → **Control–Option–N** by default → write a note → **Escape** to return to work.
+Press **Control–Option–P** by default to toggle pins in the current document. Click a pin to edit its note.
+
+Change either shortcut in **Stick → Settings…** from the menu bar, or press **Command–comma** while a Stick window is active. Choose modifiers and a key for each action, then **Apply**. Your choices persist between launches and update the menus and onboarding guide. **Restore defaults** stages the original shortcuts; Apply confirms them.
+
+Stick warns about duplicate assignments, its own menu shortcuts, enabled macOS system shortcuts, and registration conflicts reported by macOS. A rejected change leaves the previous working shortcuts active. Some shortcuts handled inside other apps or shared through other mechanisms cannot be detected; choose another combination if one still overlaps.
 
 ## Run
 
@@ -20,7 +24,7 @@ You can view saved notes without granting access. Setup only completes once perm
 
 These development builds are ad-hoc signed, so rebuilding can require removing and re-adding the app’s permission, then relaunching. The onboarding UI cannot eliminate that signing limitation.
 
-Stick’s simple folded-note mark appears in its app icon and menu bar. The menu provides Add Note, Show/Hide Pins, All Notes, and Getting Started. The app needs no account or network connection. It does not capture screenshots or use the clipboard to read selections.
+Stick’s simple folded-note mark appears in its app icon and menu bar. The menu provides Add Note, Show/Hide Pins, All Notes, Getting Started, and Settings. The app needs no account or network connection. It does not capture screenshots or use the clipboard to read selections.
 
 ## Notes and attachment
 
@@ -31,7 +35,7 @@ Stick’s simple folded-note mark appears in its app icon and menu bar. The menu
 - Pins align with the first line of their passage. Collisions spread horizontally on that same line; they never wrap onto another line. Pins that cannot fit on the visible screen are hidden until there is room.
 - All Notes supports immediate search, opening the source document, editing, deleting, and reattaching a note. Return opens the selected search result (or the first result); Down moves from search into the list. Hidden lists defer redraws, and updates preserve the selected note. Open Source opens the document; it does not automatically scroll to an offscreen passage.
 - The Needs location filter reflects missing or ambiguous anchors found when the source document is inspected. Offscreen notes stay in All Notes. Documents that haven't been inspected aren't classified as missing.
-- Reattach keeps the note body: choose Reattach, select a new passage in the source app, then press Control–Option–N.
+- Reattach keeps the note body: choose Reattach, select a new passage in the source app, then use your Add Note shortcut.
 
 ## Compatibility
 

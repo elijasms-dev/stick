@@ -21,6 +21,8 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
     private let revealApp: () -> Void
     private let onFinish: () -> Void
     private let onShowNotes: () -> Void
+    private var shortcutConfiguration: ShortcutConfiguration
+    private var shortcutLabels: [ShortcutAction: NSTextField] = [:]
     private var titleLabel: NSTextField!
     private var descriptionLabel: NSTextField!
     private var statusIcon: NSImageView!
@@ -34,7 +36,8 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
     private var primaryButton: NSButton!
     private var permissionContent: NSStackView!
 
-    init(checkAccess: @escaping () -> Bool = { AXIsProcessTrusted() },
+    init(configuration: ShortcutConfiguration = .defaults,
+         checkAccess: @escaping () -> Bool = { AXIsProcessTrusted() },
          requestAccess: @escaping () -> Void = {
              let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
              _ = AXIsProcessTrustedWithOptions(options)
@@ -46,6 +49,7 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
          revealApp: @escaping () -> Void = { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) },
          onFinish: @escaping () -> Void, onShowNotes: @escaping () -> Void) {
         self.checkAccess = checkAccess
+        self.shortcutConfiguration = configuration
         self.requestAccess = requestAccess
         self.openSettings = openSettings
         self.revealApp = revealApp
@@ -67,6 +71,14 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func updateShortcuts(_ configuration: ShortcutConfiguration) {
+        shortcutConfiguration = configuration
+        for (action, key) in [(ShortcutAction.addNote, configuration.addNote), (.togglePins, configuration.togglePins)] {
+            shortcutLabels[action]?.stringValue = key.displayString
+            shortcutLabels[action]?.setAccessibilityLabel(key.spokenString)
+        }
+    }
 
     func present() {
         refreshPermission()
@@ -175,10 +187,11 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         return surface
     }
 
-    private func shortcut(_ title: String, keys: String, spokenKeys: String) -> NSView {
+    private func shortcut(_ title: String, keys: String, spokenKeys: String, action: ShortcutAction? = nil) -> NSView {
         let name = NoteStyle.label(title, size: 13, weight: .medium)
         let key = NoteStyle.label(keys, size: 14, weight: .medium, color: NoteStyle.accent)
         key.setAccessibilityLabel(spokenKeys)
+        if let action { shortcutLabels[action] = key }
         key.setContentHuggingPriority(.required, for: .horizontal)
         let row = NSStackView(views: [name, NSView(), key])
         row.spacing = 12
@@ -211,8 +224,10 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         explanationLabel = copy("", size: 13)
         let divider = NSBox(); divider.boxType = .separator
         shortcuts = vertical([divider,
-                              shortcut("Add a note to selected text", keys: "⌃ ⌥ N", spokenKeys: "Control Option N"),
-                              shortcut("Show or hide your pins", keys: "⌃ ⌥ P", spokenKeys: "Control Option P"),
+                              shortcut("Add a note to selected text", keys: shortcutConfiguration.addNote.displayString,
+                                       spokenKeys: shortcutConfiguration.addNote.spokenString, action: .addNote),
+                              shortcut("Show or hide your pins", keys: shortcutConfiguration.togglePins.displayString,
+                                       spokenKeys: shortcutConfiguration.togglePins.spokenString, action: .togglePins),
                               shortcut("Close a note and return", keys: "esc", spokenKeys: "Escape")], spacing: 14)
         let card = inset(vertical([status, explanationLabel, shortcuts], spacing: 14))
         detailLabel = copy("", size: 12)

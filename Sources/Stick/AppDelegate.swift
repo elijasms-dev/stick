@@ -16,6 +16,10 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     private var lastRefresh = Date.distantPast
     private var geometryRevision = 0
     private let hotkeys = Hotkeys()
+    private let shortcutPreferences = ShortcutPreferences()
+    private var shortcuts = ShortcutConfiguration.defaults
+    private var shortcutSettings: ShortcutSettingsController?
+    private var shortcutWarning: String?
     private var status: NSStatusItem!
     private let overlays = PinOverlayController()
     private var editor: NoteEditorController?
@@ -36,6 +40,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     private var failureShown = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        shortcuts = shortcutPreferences.load()
         installEditingMenu()
         do { store = try NoteStore() } catch { alert("Couldn’t load your notes", error.localizedDescription) }
         sourcePID = externalApp()?.processIdentifier
@@ -62,7 +67,8 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
                 if id == 1 { self?.addNote() } else { self?.togglePins() }
             }
         }
-        do { try hotkeys.start() } catch { alert("Shortcut unavailable", error.localizedDescription) }
+        do { try hotkeys.start(configuration: shortcuts) }
+        catch { shortcutWarning = error.localizedDescription }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
@@ -86,6 +92,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         self.timer = timer
         if !UserDefaults.standard.bool(forKey: "welcomeShown") || !AXIsProcessTrusted() { showWelcome() }
         else { showNotes() }
+        if shortcutWarning != nil { showShortcutSettings() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -131,16 +138,18 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         // editing a note in this accessory app.
         let main = NSMenu()
         let application = NSMenuItem(); application.submenu = NSMenu(title: "Stick")
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showShortcutSettings), keyEquivalent: ",")
+        settings.target = self
+        application.submenu?.addItem(settings)
+        application.submenu?.addItem(.separator())
         application.submenu?.addItem(withTitle: "Quit Stick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         main.addItem(application)
         let notes = NSMenuItem(); notes.submenu = NSMenu(title: "Notes")
-        for (title, action, key) in [
-            ("Add note to selection", #selector(addNote), "n"),
-            (visible ? "Hide pins" : "Show pins", #selector(togglePins), "p")
+        for (title, action, shortcut) in [
+            ("Add note to selection", #selector(addNote), shortcuts.addNote),
+            (visible ? "Hide pins" : "Show pins", #selector(togglePins), shortcuts.togglePins)
         ] {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-            item.keyEquivalentModifierMask = [.control, .option]; item.target = self
-            notes.submenu?.addItem(item)
+            notes.submenu?.addItem(shortcutMenuItem(title: title, action: action, shortcut: shortcut))
         }
         let all = NSMenuItem(title: "All Notes…", action: #selector(showNotes), keyEquivalent: "")
         all.target = self; notes.submenu?.addItem(all)
@@ -167,17 +176,25 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     }
     private func targetPID() -> pid_t? { externalApp()?.processIdentifier ?? sourcePID }
 
+    private func shortcutMenuItem(title: String, action: Selector, shortcut: KeyboardShortcut) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: shortcut.menuKeyEquivalent)
+        item.keyEquivalentModifierMask = shortcut.menuModifierMask
+        item.target = self
+        return item
+    }
+
     private func rebuildMenu() {
         let menu = NSMenu()
-        for (title, action, key) in [("Add note to selection", #selector(addNote), "n"), (visible ? "Hide pins" : "Show pins", #selector(togglePins), "p")] {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-            item.keyEquivalentModifierMask = [.control, .option]; item.target = self; menu.addItem(item)
+        for (title, action, shortcut) in [("Add note to selection", #selector(addNote), shortcuts.addNote), (visible ? "Hide pins" : "Show pins", #selector(togglePins), shortcuts.togglePins)] {
+            menu.addItem(shortcutMenuItem(title: title, action: action, shortcut: shortcut))
         }
         menu.addItem(.separator())
         let all = NSMenuItem(title: "All Notes…", action: #selector(showNotes), keyEquivalent: "")
         all.target = self; menu.addItem(all)
         let help = NSMenuItem(title: "Getting Started…", action: #selector(showWelcome), keyEquivalent: "")
         help.target = self; menu.addItem(help)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showShortcutSettings), keyEquivalent: ",")
+        settings.target = self; menu.addItem(settings)
         if pendingReattach != nil {
             let cancel = NSMenuItem(title: "Cancel reattaching note", action: #selector(cancelReattach), keyEquivalent: "")
             cancel.target = self; menu.addItem(cancel)
@@ -185,8 +202,37 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Stick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp; menu.addItem(quit); status.menu = menu
-        status.button?.toolTip = visible ? "Stick — pins visible" : "Stick — Control–Option–N adds a note"
+        status.button?.toolTip = visible ? "Stick — pins visible" : "Stick — \(shortcuts.addNote.spokenString) adds a note"
         installEditingMenu()
+    }
+
+    @objc private func showShortcutSettings() {
+        if shortcutSettings == nil {
+            shortcutSettings = ShortcutSettingsController(configuration: shortcuts, onApply: { [weak self] configuration in
+                guard let self else { return "Stick is no longer available." }
+                return self.applyShortcuts(configuration)
+            })
+        }
+        // Reopening an already visible Settings window should not discard its draft.
+        if shortcutSettings?.window?.isVisible != true {
+            shortcutSettings?.update(configuration: shortcuts, warning: shortcutWarning)
+        }
+        shortcutSettings?.present()
+    }
+
+    private func applyShortcuts(_ configuration: ShortcutConfiguration) -> String? {
+        do {
+            try hotkeys.apply(configuration: configuration)
+            try shortcutPreferences.save(configuration)
+            shortcuts = configuration
+            shortcutWarning = nil
+            rebuildMenu()
+            welcome?.updateShortcuts(configuration)
+            list?.updateShortcut(configuration.addNote)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     private func permissionReady() -> Bool {
@@ -368,9 +414,9 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
             list = NotesListController(onOpen: { [weak self] in self?.openNote($0) }, onReveal: { [weak self] in self?.openSource($0) }, onReattach: { [weak self] id in
                 guard let self else { return }
                 self.pendingReattach = id; self.rebuildMenu(); self.list?.close()
-                self.alert("Choose a new location", "Select the text you want to attach this note to, then press Control–Option–N. Your note will keep its existing text.")
+                self.alert("Choose a new location", "Select the text you want to attach this note to, then press \(self.shortcuts.addNote.spokenString). Your note will keep its existing text.")
                 if let pid = self.sourcePID { NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps]) }
-            }, onDelete: { [weak self] in self?.delete($0) })
+            }, onDelete: { [weak self] in self?.delete($0) }, addNoteShortcut: shortcuts.addNote)
         }
         list?.update(notes: store?.notes ?? [], unplaced: unplaced); list?.present()
     }
@@ -396,7 +442,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
             onboardingReturnPID = app?.bundleIdentifier == "com.apple.systempreferences" ? nil : app?.processIdentifier
         }
         if welcome == nil {
-            welcome = OnboardingController(onFinish: { [weak self] in
+            welcome = OnboardingController(configuration: shortcuts, onFinish: { [weak self] in
                 guard let self, AXIsProcessTrusted() else { return }
                 UserDefaults.standard.set(true, forKey: "welcomeShown")
                 if let pid = self.onboardingReturnPID, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
