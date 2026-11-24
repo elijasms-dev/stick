@@ -2,7 +2,23 @@ import AppKit
 import StickCore
 
 private enum NoteStyle {
-    static let accent = NSColor.systemYellow
+    // Quiet, opaque surfaces stay legible over other apps. Resolve colors at draw time.
+    static let accent = adaptive(light: 0x6255D9, dark: 0xB4AAFF)
+    static let actionFill = adaptive(light: 0x6255D9, dark: 0x6B5CDC)
+    static let paper = adaptive(light: 0xFFFFFF, dark: 0x22242B)
+    static let surface = adaptive(light: 0xF7F8FC, dark: 0x30343F)
+    static let edge = adaptive(light: 0xDDE1EA, dark: 0x555B6B)
+    static let hover = adaptive(light: 0xEEEBFF, dark: 0x3D3758)
+    static let pressed = adaptive(light: 0xDED8FF, dark: 0x4C426B)
+
+    private static func adaptive(light: UInt32, dark: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let hex = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+                           green: CGFloat((hex >> 8) & 0xFF) / 255,
+                           blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+        }
+    }
     static func label(_ text: String, size: CGFloat = 12, weight: NSFont.Weight = .regular,
                       color: NSColor = .labelColor) -> NSTextField {
         let field = NSTextField(labelWithString: text)
@@ -27,6 +43,17 @@ private enum NoteStyle {
         alert.beginSheetModal(for: window) { response in
             if response == .alertSecondButtonReturn { completion() }
         }
+    }
+}
+
+private final class NoteSurface: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NoteStyle.surface.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 
@@ -66,7 +93,7 @@ final class NoteEditorController: NSWindowController, NSTextViewDelegate, NSWind
         window.minSize = NSSize(width: 300, height: 260)
         window.level = .floating
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = .windowBackgroundColor
+        window.backgroundColor = NoteStyle.paper
         super.init(window: window)
         let frameName = NSWindow.FrameAutosaveName("StickNote-\(note.id.uuidString)")
         hasSavedFrame = window.setFrameUsingName(frameName)
@@ -80,32 +107,42 @@ final class NoteEditorController: NSWindowController, NSTextViewDelegate, NSWind
 
     private func buildContent() {
         guard let content = window?.contentView else { return }
-        let source = NoteStyle.label(note.documentTitle, size: 13, weight: .semibold)
+        let source = NoteStyle.label(note.documentTitle, size: 14, weight: .semibold)
         source.toolTip = note.documentTitle
         source.setAccessibilityLabel("Source document")
         let app = NoteStyle.label(note.appName, color: .secondaryLabelColor)
-        let quote = NoteStyle.label(note.anchor.quote.replacingOccurrences(of: "\n", with: " "), color: .secondaryLabelColor)
+        let quote = NoteStyle.label(note.anchor.quote.replacingOccurrences(of: "\n", with: " "), size: 12)
         quote.toolTip = note.anchor.quote
         quote.setAccessibilityLabel("Pinned text")
-        let stripe = NSView()
-        stripe.wantsLayer = true
-        stripe.layer?.backgroundColor = NoteStyle.accent.cgColor
-        stripe.widthAnchor.constraint(equalToConstant: 3).isActive = true
-        let quoteRow = NSStackView(views: [stripe, quote])
+        let quoteIcon = NSImageView(image: NSImage(systemSymbolName: "text.quote", accessibilityDescription: nil)!)
+        quoteIcon.contentTintColor = NoteStyle.accent
+        quoteIcon.symbolConfiguration = .init(pointSize: 12, weight: .medium)
+        quoteIcon.setAccessibilityElement(false)
+        quoteIcon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        let quoteRow = NSStackView(views: [quoteIcon, quote])
         quoteRow.orientation = .horizontal
-        quoteRow.spacing = 9
+        quoteRow.spacing = 8
         quoteRow.alignment = .centerY
-        stripe.heightAnchor.constraint(equalTo: quoteRow.heightAnchor).isActive = true
+        let quoteSurface = NoteSurface()
+        quoteRow.translatesAutoresizingMaskIntoConstraints = false
+        quoteSurface.addSubview(quoteRow)
+        NSLayoutConstraint.activate([
+            quoteRow.leadingAnchor.constraint(equalTo: quoteSurface.leadingAnchor, constant: 10),
+            quoteRow.trailingAnchor.constraint(equalTo: quoteSurface.trailingAnchor, constant: -10),
+            quoteRow.topAnchor.constraint(equalTo: quoteSurface.topAnchor, constant: 9),
+            quoteRow.bottomAnchor.constraint(equalTo: quoteSurface.bottomAnchor, constant: -9)
+        ])
 
         textView.string = note.body
         textView.font = .systemFont(ofSize: 15)
         textView.textColor = .textColor
-        textView.backgroundColor = .textBackgroundColor
+        textView.backgroundColor = NoteStyle.paper
+        textView.insertionPointColor = NoteStyle.accent
         textView.isRichText = false
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
-        textView.textContainerInset = NSSize(width: 10, height: 12)
+        textView.textContainerInset = NSSize(width: 0, height: 10)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -117,39 +154,55 @@ final class NoteEditorController: NSWindowController, NSTextViewDelegate, NSWind
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
         scroll.documentView = textView
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let saved = NoteStyle.label("Saves as you type", color: .secondaryLabelColor)
-        let delete = NoteStyle.button("Delete", target: self, action: #selector(deleteNote))
+        let saved = NoteStyle.label("Saves as you type", size: 11, color: .secondaryLabelColor)
+        let delete = NSButton(image: NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete this note")!,
+                              target: self, action: #selector(deleteNote))
+        delete.isBordered = false
+        delete.contentTintColor = .secondaryLabelColor
+        delete.toolTip = "Delete this note"
+        delete.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        delete.heightAnchor.constraint(equalToConstant: 28).isActive = true
         delete.setAccessibilityLabel("Delete this note")
         let done = NoteStyle.button("Done", target: self, action: #selector(doneEditing))
+        done.bezelColor = NoteStyle.actionFill
         done.keyEquivalent = "\u{1b}"
         let spacer = NSView()
         let footer = NSStackView(views: [saved, spacer, delete, done])
         footer.orientation = .horizontal
         footer.spacing = 8
-        let header = NSStackView(views: [source, app, quoteRow])
+        let header = NSStackView(views: [source, app, quoteSurface])
         header.orientation = .vertical
         header.alignment = .leading
-        header.spacing = 5
-        for view in [header, scroll, footer] {
+        header.spacing = 4
+        header.setCustomSpacing(12, after: app)
+        let divider = NSBox()
+        divider.boxType = .separator
+        for view in [header, scroll, divider, footer] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
-            header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
-            header.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
-            quoteRow.widthAnchor.constraint(equalTo: header.widthAnchor),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 14),
+            header.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            header.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            source.widthAnchor.constraint(equalTo: header.widthAnchor),
+            app.widthAnchor.constraint(equalTo: header.widthAnchor),
+            quoteSurface.widthAnchor.constraint(equalTo: header.widthAnchor),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -12),
-            footer.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            footer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            footer.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)
+            scroll.bottomAnchor.constraint(equalTo: divider.topAnchor, constant: -8),
+            divider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            divider.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            divider.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
+            footer.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            footer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            footer.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
         ])
     }
 
@@ -383,20 +436,82 @@ private final class PinPanel: NSPanel {
 
 private final class PinButton: NSButton {
     var onClick: (() -> Void)?
+    private var isHovered = false
+    private var hoverTracking: NSTrackingArea?
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         isBordered = false
-        bezelStyle = .circular
-        wantsLayer = true
-        layer?.cornerRadius = 13
-        layer?.backgroundColor = NSColor.systemYellow.cgColor
-        contentTintColor = .black
-        image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Note pin")
-        imagePosition = .imageOnly
+        title = ""
+        setButtonType(.momentaryChange)
         target = self
         action = #selector(pressed)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverTracking = area
+    }
+    override func mouseEntered(with event: NSEvent) { isHovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false; needsDisplay = true }
+    func refreshHoverState() {
+        guard let window else { return }
+        let hovered = bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        if hovered != isHovered { isHovered = hovered; needsDisplay = true }
+    }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override func highlight(_ flag: Bool) { super.highlight(flag); needsDisplay = true }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let isPressed = cell?.isHighlighted == true
+        let tab = NSBezierPath(roundedRect: bounds.insetBy(dx: 2.5, dy: 2.5), xRadius: 6, yRadius: 6)
+        (isPressed ? NoteStyle.pressed : isHovered ? NoteStyle.hover : NoteStyle.surface).setFill()
+        tab.fill()
+        (isHovered || isPressed ? NoteStyle.accent : NoteStyle.edge).setStroke()
+        tab.lineWidth = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 1.5 : 1
+        tab.stroke()
+
+        // A folded note, rather than a literal pushpin. All states share the same hit target.
+        NSGraphicsContext.saveGraphicsState()
+        let transform = NSAffineTransform()
+        transform.translateX(by: bounds.midX - 13, yBy: bounds.midY - 13 + (isPressed ? 0.5 : 0))
+        transform.concat()
+        let note = NSBezierPath()
+        note.move(to: NSPoint(x: 9, y: 6.5))
+        note.line(to: NSPoint(x: 17, y: 6.5))
+        note.curve(to: NSPoint(x: 18.5, y: 8), controlPoint1: NSPoint(x: 18, y: 6.5), controlPoint2: NSPoint(x: 18.5, y: 7))
+        note.line(to: NSPoint(x: 18.5, y: 15))
+        note.line(to: NSPoint(x: 14, y: 19.5))
+        note.line(to: NSPoint(x: 9, y: 19.5))
+        note.curve(to: NSPoint(x: 7.5, y: 18), controlPoint1: NSPoint(x: 8, y: 19.5), controlPoint2: NSPoint(x: 7.5, y: 19))
+        note.line(to: NSPoint(x: 7.5, y: 8))
+        note.curve(to: NSPoint(x: 9, y: 6.5), controlPoint1: NSPoint(x: 7.5, y: 7), controlPoint2: NSPoint(x: 8, y: 6.5))
+        note.close()
+        NoteStyle.accent.setFill()
+        note.fill()
+
+        let marks = NSBezierPath()
+        marks.move(to: NSPoint(x: 10, y: 10))
+        marks.line(to: NSPoint(x: 16, y: 10))
+        marks.move(to: NSPoint(x: 10, y: 13))
+        marks.line(to: NSPoint(x: 13, y: 13))
+        marks.move(to: NSPoint(x: 14, y: 19))
+        marks.line(to: NSPoint(x: 14, y: 15))
+        marks.line(to: NSPoint(x: 18, y: 15))
+        marks.lineWidth = 1.2
+        marks.lineCapStyle = .round
+        marks.lineJoinStyle = .round
+        NoteStyle.surface.setStroke()
+        marks.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+    }
     @objc private func pressed() { onClick?() }
 }
 
@@ -456,6 +571,7 @@ final class PinOverlayController {
             occupied.append(frame)
             panel.setFrame(frame, display: true)
             panel.orderFrontRegardless()
+            button.refreshHoverState()
         }
     }
 

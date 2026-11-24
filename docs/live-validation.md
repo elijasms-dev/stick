@@ -18,3 +18,11 @@ The test found and fixed a focus-restoration issue: an editor previously returne
 To repeat manually, save a plain-text document containing two distinct passages approximately 20 lines apart. Select each passage and use Control–Option–N to save different notes. Scroll until both passages are visible, reveal the pins with Control–Option–P, and open each pin to check its note. Repeat after quitting and reopening Stick.
 
 This result covers the TextEdit workflow on the development Mac. Safari and VS Code have separate Accessibility diagnostics described in the README; this run does not establish complete workflows in those apps or universal compatibility.
+
+## Pin and editor appearance refresh
+
+Rechecked the refreshed build on 24 November 2026. In TextEdit, Control–Option–P hid and revealed both saved pins, each pin opened its own note with keyboard focus, and Escape returned focus to TextEdit. Restarting the refreshed build preserved both notes. Both pin windows remained 26 × 26 points and aligned with their original passages.
+
+Rendered the actual AppKit views in light and dark appearances, including resting, hovered, and pressed pin states, and at the editor's minimum size. Inspected the running dark-mode editor as well. The 13 core tests and release build passed. These visual changes do not extend the app-compatibility coverage described above.
+
+![AppKit rendering of the refreshed editor and pin states in light and dark appearances](images/pin-ui.png)
