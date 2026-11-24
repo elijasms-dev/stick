@@ -57,4 +57,6 @@ This invokes the same selection capture and resolution logic as the UI without s
 
 Tests cover shifted text, Unicode ranges, duplicate anchors, missing text, persistence, deletion, unsupported storage versions, and failed writes. For manual validation, add separate notes to two visible passages, scroll, insert text above them, switch documents, quit/reopen Stick, and test reattachment after deleting the selected passage.
 
+The global shortcuts and two independent TextEdit pins have also passed a [live workflow check](docs/live-validation.md), including clicking both pins, keyboard focus, autosave, and restart persistence.
+
 Distribution builds produced by the script are locally ad-hoc signed. Public distribution requires Developer ID signing and notarization.

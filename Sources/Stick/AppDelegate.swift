@@ -162,7 +162,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
                     }
                     guard self.save(note) else { return }
                     self.observedContext = c
-                    self.openEditor(note, point: self.cocoaRect(captured.bounds).origin)
+                    self.openEditor(note, point: self.cocoaRect(captured.bounds).origin, returnPID: c.pid)
                     self.rebuildMenu()
                 }
             }
@@ -236,13 +236,17 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     }
     private func openNote(_ id: UUID) {
         guard let note = store?.notes.first(where: { $0.id == id }) else { return }
-        openEditor(note, point: nil)
+        let returnPID = NSRunningApplication.runningApplications(withBundleIdentifier: note.appBundleID).first?.processIdentifier
+        openEditor(note, point: nil, returnPID: returnPID)
     }
-    private func openEditor(_ note: StickNote, point: NSPoint?) {
+    private func openEditor(_ note: StickNote, point: NSPoint?, returnPID: pid_t?) {
         editor?.close()
-        editor = NoteEditorController(note: note, onChange: { [weak self] in _ = self?.save($0) }, onDelete: { [weak self] in self?.delete($0) }, onClose: { [weak self] in
-            guard let self, let pid = self.sourcePID else { return }
-            NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+        editor = NoteEditorController(note: note, onChange: { [weak self] in _ = self?.save($0) }, onDelete: { [weak self] in self?.delete($0) }, onClose: {
+            // Returning to work belongs to this editor's source, even if another
+            // app becomes active while the note remains open.
+            guard let returnPID, let sourceApp = NSRunningApplication(processIdentifier: returnPID),
+                  sourceApp.bundleIdentifier == note.appBundleID, !sourceApp.isTerminated else { return }
+            sourceApp.activate(options: [.activateIgnoringOtherApps])
         })
         editor?.present(near: point)
     }
