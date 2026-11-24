@@ -55,4 +55,6 @@ On 24 November 2026, used a fresh `stick-smoothing-test.txt` fixture without ove
 
 The final source also fixes horizontal drift by using a stable editor gutter and persists observed invalidation so a deleted quote cannot transfer to a surviving duplicate after restart. All 46 automated tests and the release build passed, including legacy note decoding, persistent invalidation, live undo, pin geometry, save failures, and keyboard navigation. No compiler concurrency warnings remained.
 
-The final build's Accessibility entry was refreshed and its setup window detected access. Live validation of the final gutter revision was interrupted when the sample document closed; an uninterrupted final check remains pending. These are still ad-hoc development builds; stable signing was not configured. This pass does not extend the Safari or VS Code coverage above.
+The final build's Accessibility entry was refreshed and its setup window detected access. The subsequent live demo completed the final gutter check: both independent pins opened their correct notes, aligned with their lines while scrolling, and followed an inserted line immediately before the first quote. Both retained the same gutter X position when the first passage's indentation changed. GitHub's checks passed for the tested source.
+
+These are still ad-hoc development builds; stable signing was not configured. This pass does not extend the Safari or VS Code coverage above.
