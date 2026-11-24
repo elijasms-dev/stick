@@ -1,7 +1,7 @@
 import AppKit
 import StickCore
 
-private enum NoteStyle {
+enum NoteStyle {
     // Quiet, opaque surfaces stay legible over other apps. Resolve colors at draw time.
     static let accent = adaptive(light: 0x6255D9, dark: 0xB4AAFF)
     static let actionFill = adaptive(light: 0x6255D9, dark: 0x6B5CDC)
@@ -46,7 +46,7 @@ private enum NoteStyle {
     }
 }
 
-private final class NoteSurface: NSView {
+final class NoteSurface: NSView {
     override func draw(_ dirtyRect: NSRect) {
         NoteStyle.surface.setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()

@@ -14,7 +14,11 @@ bash scripts/build-app.sh
 open dist/Stick.app
 ```
 
-Keep the app in one location. In Stick's Getting Started window, open Accessibility Settings and enable Stick under **Privacy & Security → Accessibility**. If it isn't listed, add the built app with the + button. Rebuilding an ad-hoc-signed app can require removing and re-adding its permission.
+Keep the app in one location. Stick’s setup window explains its Accessibility access before you enable it. Choose **Enable Accessibility…**, then turn on Stick in System Settings. If macOS doesn’t display a prompt, **Open System Settings** takes you directly to the permission list. The window detects access automatically and shows the note shortcuts. **Start using Stick** returns you to your previous app when it’s still available, or opens your notes.
+
+You can view saved notes without granting access. Setup only completes once permission is confirmed; closing the window doesn’t mark it complete. If access is later removed, Stick hides its pins and guides you through setup the next time you use them. **Need help with access?** explains how to add the app or refresh an outdated entry.
+
+These development builds are ad-hoc signed, so rebuilding can require removing and re-adding the app’s permission, then relaunching. The onboarding UI cannot eliminate that signing limitation.
 
 The menu bar pin provides Add Note, Show/Hide Pins, All Notes, and Getting Started. The app needs no account or network connection. It does not capture screenshots or use the clipboard to read selections.
 

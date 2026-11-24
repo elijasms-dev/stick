@@ -22,7 +22,9 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     private var unplaced = Set<UUID>()
     private var pendingReattach: UUID?
     private var activationObserver: NSObjectProtocol?
-    private var welcome: NSWindowController?
+    private var welcome: OnboardingController?
+    private var onboardingReturnPID: pid_t?
+    private var accessibilityTrusted = AXIsProcessTrusted()
     private var generation = 0
     private var failureShown = false
 
@@ -53,7 +55,11 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in if self?.visible == true { self?.refreshPins() } }
+            Task { @MainActor in
+                guard let self else { return }
+                self.checkPermissionChanges()
+                if self.visible { self.refreshPins() }
+            }
         }
         if !UserDefaults.standard.bool(forKey: "welcomeShown") || !AXIsProcessTrusted() { showWelcome() }
         else { showNotes() }
@@ -64,9 +70,29 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        checkPermissionChanges()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showNotes()
+        if !AXIsProcessTrusted() || !UserDefaults.standard.bool(forKey: "welcomeShown") { showWelcome() }
+        else { showNotes() }
         return true
+    }
+
+    private func checkPermissionChanges() {
+        let trusted = AXIsProcessTrusted()
+        welcome?.refreshPermission()
+        guard trusted != accessibilityTrusted else { return }
+        accessibilityTrusted = trusted
+        if !trusted {
+            // Invalidate in-flight scans too: a late result must not restore old pins.
+            generation += 1
+            visible = false
+            overlays.hide()
+            observedContext = nil
+            rebuildMenu()
+        }
     }
 
     private func installEditingMenu() {
@@ -133,7 +159,8 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func permissionReady() -> Bool {
-        if AXIsProcessTrusted() { return true }
+        checkPermissionChanges()
+        if accessibilityTrusted { return true }
         logger.notice("Command needs Accessibility permission")
         showWelcome(); return false
     }
@@ -147,6 +174,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
             let result = Result { try AccessibilityEngine().captureSelection(pid: pid) }
             DispatchQueue.main.async { [self] in
                 self.capturing = false
+                guard self.permissionReady() else { return }
                 switch result {
                 case .failure(let error): self.alert("Select some text first", error.localizedDescription)
                 case .success(let captured):
@@ -185,7 +213,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
             let result = Result { try AccessibilityEngine().resolve(notes: notes, pid: pid) }
             DispatchQueue.main.async { [self] in
                 self.busy = false
-                guard self.visible, token == self.generation else { return }
+                guard self.visible, token == self.generation, AXIsProcessTrusted() else { return }
                 switch result {
                 case .failure:
                     self.overlays.hide()
@@ -279,29 +307,20 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func cancelReattach() { pendingReattach = nil; rebuildMenu() }
 
     @objc private func showWelcome() {
-        if let welcome { welcome.showWindow(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 430, height: 350), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        panel.title = "Welcome to Stick"; panel.isReleasedWhenClosed = false
-        let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 18; stack.translatesAutoresizingMaskIntoConstraints = false
-        let title = NSTextField(labelWithString: "Leave a thought where it belongs.")
-        title.font = .systemFont(ofSize: 22, weight: .semibold)
-        let copy = NSTextField(wrappingLabelWithString: "Select text in your document, then press Control–Option–N to add a note.\n\nControl–Option–P reveals or hides the pins in your current document. Click a pin to open its note. Escape returns you to work.\n\nStick uses Accessibility to locate your selections. Notes stay on this Mac.")
-        copy.font = .systemFont(ofSize: 14)
-        let settings = NSButton(title: "Open Accessibility Settings", target: self, action: #selector(openAccessibilitySettings))
-        settings.bezelStyle = .rounded
-        let done = NSButton(title: "Get Started", target: self, action: #selector(dismissWelcome)); done.bezelStyle = .rounded; done.keyEquivalent = "\r"
-        [title, copy, settings, done].forEach(stack.addArrangedSubview)
-        panel.contentView!.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor, constant: -24), stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 24)])
-        welcome = NSWindowController(window: panel); panel.center(); welcome?.showWindow(nil); NSApp.activate(ignoringOtherApps: true)
-    }
-    @objc private func openAccessibilitySettings() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
-    }
-    @objc private func dismissWelcome() {
-        UserDefaults.standard.set(true, forKey: "welcomeShown"); welcome?.close()
+        if welcome?.window?.isVisible != true {
+            let app = externalApp() ?? sourcePID.flatMap { NSRunningApplication(processIdentifier: $0) }
+            onboardingReturnPID = app?.bundleIdentifier == "com.apple.systempreferences" ? nil : app?.processIdentifier
+        }
+        if welcome == nil {
+            welcome = OnboardingController(onFinish: { [weak self] in
+                guard let self, AXIsProcessTrusted() else { return }
+                UserDefaults.standard.set(true, forKey: "welcomeShown")
+                if let pid = self.onboardingReturnPID, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
+                    app.activate(options: [.activateIgnoringOtherApps])
+                } else { self.showNotes() }
+            }, onShowNotes: { [weak self] in self?.showNotes() })
+        }
+        welcome?.present()
     }
     private func alert(_ title: String, _ message: String) {
         let alert = NSAlert(); alert.messageText = title; alert.informativeText = message; alert.addButton(withTitle: "OK")

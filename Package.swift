@@ -8,6 +8,7 @@ let package = Package(
     targets: [
         .target(name: "StickCore"),
         .executableTarget(name: "Stick", dependencies: ["StickCore"], linkerSettings: [.linkedFramework("Carbon")]),
-        .testTarget(name: "StickCoreTests", dependencies: ["StickCore"])
+        .testTarget(name: "StickCoreTests", dependencies: ["StickCore"]),
+        .testTarget(name: "StickTests", dependencies: ["Stick"])
     ]
 )
