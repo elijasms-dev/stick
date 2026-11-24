@@ -1,0 +1,11 @@
+name: Test
+on: [push, pull_request]
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test anchors and persistence
+        run: swift test --build-system native
+      - name: Build app bundle
+        run: bash scripts/build-app.sh
