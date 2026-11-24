@@ -1,9 +1,11 @@
 import AppKit
 import ApplicationServices
+import OSLog
 import StickCore
 
 @MainActor
 final class StickAppDelegate: NSObject, NSApplicationDelegate {
+    private let logger = Logger(subsystem: "dev.elijasms.stick", category: "commands")
     private var store: NoteStore?
     private let queue = DispatchQueue(label: "dev.elijasms.stick.accessibility", qos: .userInitiated)
     private let hotkeys = Hotkeys()
@@ -33,6 +35,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
         hotkeys.onPress = { [weak self] id in
             Task { @MainActor in
+                self?.logger.notice("Global shortcut received: \(id)")
                 if id == 1 { self?.addNote() } else { self?.togglePins() }
             }
         }
@@ -53,6 +56,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in if self?.visible == true { self?.refreshPins() } }
         }
         if !UserDefaults.standard.bool(forKey: "welcomeShown") || !AXIsProcessTrusted() { showWelcome() }
+        else { showNotes() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -72,6 +76,18 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         let application = NSMenuItem(); application.submenu = NSMenu(title: "Stick")
         application.submenu?.addItem(withTitle: "Quit Stick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         main.addItem(application)
+        let notes = NSMenuItem(); notes.submenu = NSMenu(title: "Notes")
+        for (title, action, key) in [
+            ("Add note to selection", #selector(addNote), "n"),
+            (visible ? "Hide pins" : "Show pins", #selector(togglePins), "p")
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = [.control, .option]; item.target = self
+            notes.submenu?.addItem(item)
+        }
+        let all = NSMenuItem(title: "All Notes…", action: #selector(showNotes), keyEquivalent: "")
+        all.target = self; notes.submenu?.addItem(all)
+        main.addItem(notes)
         let edit = NSMenuItem(); edit.submenu = NSMenu(title: "Edit")
         for (title, action, key) in [
             ("Undo", Selector(("undo:")), "z"),
@@ -113,10 +129,12 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         let quit = NSMenuItem(title: "Quit Stick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp; menu.addItem(quit); status.menu = menu
         status.button?.toolTip = visible ? "Stick — pins visible" : "Stick — Control–Option–N adds a note"
+        installEditingMenu()
     }
 
     private func permissionReady() -> Bool {
         if AXIsProcessTrusted() { return true }
+        logger.notice("Command needs Accessibility permission")
         showWelcome(); return false
     }
 

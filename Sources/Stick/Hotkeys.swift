@@ -9,10 +9,11 @@ final class Hotkeys {
     func start() throws {
         var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let context = Unmanaged.passUnretained(self).toOpaque()
-        let status = InstallEventHandler(GetApplicationEventTarget(), { _, event, pointer in
+        let status = InstallEventHandler(GetEventDispatcherTarget(), { _, event, pointer in
             guard let event, let pointer else { return OSStatus(eventNotHandledErr) }
             var key = EventHotKeyID()
-            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &key)
+            let result = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &key)
+            guard result == noErr, key.signature == 0x5354494B, key.id == 1 || key.id == 2 else { return OSStatus(eventNotHandledErr) }
             let hotkeys = Unmanaged<Hotkeys>.fromOpaque(pointer).takeUnretainedValue()
             hotkeys.onPress?(key.id)
             return noErr
@@ -27,7 +28,7 @@ final class Hotkeys {
     private func register(code: UInt32, id: UInt32) throws {
         var ref: EventHotKeyRef?
         let key = EventHotKeyID(signature: 0x5354494B, id: id)
-        let status = RegisterEventHotKey(code, UInt32(controlKey | optionKey), key, GetApplicationEventTarget(), 0, &ref)
+        let status = RegisterEventHotKey(code, UInt32(controlKey | optionKey), key, GetEventDispatcherTarget(), 0, &ref)
         guard status == noErr, let ref else { throw Failure.registration(status) }
         refs.append(ref)
     }
