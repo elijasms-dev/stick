@@ -8,7 +8,18 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "dev.elijasms.stick", category: "commands")
     private var store: NoteStore?
     private let queue = DispatchQueue(label: "dev.elijasms.stick.accessibility", qos: .userInitiated)
+    private let engine = AccessibilityEngine()
+    private var observation: AccessibilityObservation!
+    private var motionMonitor: Any?
+    private var scheduledRefresh: DispatchWorkItem?
+    private var refreshAgain = false
+    private var lastRefresh = Date.distantPast
+    private var geometryRevision = 0
     private let hotkeys = Hotkeys()
+    private let shortcutPreferences = ShortcutPreferences()
+    private var shortcuts = ShortcutConfiguration.defaults
+    private var shortcutSettings: ShortcutSettingsController?
+    private var shortcutWarning: String?
     private var status: NSStatusItem!
     private let overlays = PinOverlayController()
     private var editor: NoteEditorController?
@@ -22,24 +33,42 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     private var unplaced = Set<UUID>()
     private var pendingReattach: UUID?
     private var activationObserver: NSObjectProtocol?
-    private var welcome: NSWindowController?
+    private var welcome: OnboardingController?
+    private var onboardingReturnPID: pid_t?
+    private var accessibilityTrusted = AXIsProcessTrusted()
     private var generation = 0
     private var failureShown = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        shortcuts = shortcutPreferences.load()
         installEditingMenu()
         do { store = try NoteStore() } catch { alert("Couldn’t load your notes", error.localizedDescription) }
         sourcePID = externalApp()?.processIdentifier
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        status.button?.image = NSImage(systemSymbolName: "pin.circle", accessibilityDescription: "Stick")
+        status.button?.image = StickBrand.image(size: 18, template: true)
+        NSApp.applicationIconImage = StickBrand.appIcon(size: 256)
         rebuildMenu()
+        observation = AccessibilityObservation { [weak self] structural in
+            guard let self, self.visible else { return }
+            self.geometryRevision += 1
+            if structural { self.generation += 1; self.overlays.hide() }
+            self.requestPinRefresh()
+        }
+        // Wheel/drag events keep geometry responsive in apps that omit AX scroll notifications.
+        // No key events or typed content are observed here.
+        motionMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel, .leftMouseDragged]) { [weak self] _ in
+            guard let self, self.visible else { return }
+            self.geometryRevision += 1
+            self.requestPinRefresh()
+        }
         hotkeys.onPress = { [weak self] id in
             Task { @MainActor in
                 self?.logger.notice("Global shortcut received: \(id)")
                 if id == 1 { self?.addNote() } else { self?.togglePins() }
             }
         }
-        do { try hotkeys.start() } catch { alert("Shortcut unavailable", error.localizedDescription) }
+        do { try hotkeys.start(configuration: shortcuts) }
+        catch { shortcutWarning = error.localizedDescription }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
@@ -49,24 +78,59 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
                 self.generation += 1
                 self.overlays.hide()
                 self.observedContext = nil
-                if self.visible { self.refreshPins() }
+                if self.visible { self.requestPinRefresh() }
             }
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in if self?.visible == true { self?.refreshPins() } }
+        let timer = Timer(timeInterval: 0.75, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.checkPermissionChanges()
+                if self.visible { self.requestPinRefresh() }
+            }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
         if !UserDefaults.standard.bool(forKey: "welcomeShown") || !AXIsProcessTrusted() { showWelcome() }
         else { showNotes() }
+        if shortcutWarning != nil { showShortcutSettings() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        timer?.invalidate(); hotkeys.stop()
+        timer?.invalidate(); hotkeys.stop(); scheduledRefresh?.cancel()
+        if let motionMonitor { NSEvent.removeMonitor(motionMonitor) }
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        editor?.flushChanges() == false ? .terminateCancel : .terminateNow
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        checkPermissionChanges()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showNotes()
+        if !AXIsProcessTrusted() || !UserDefaults.standard.bool(forKey: "welcomeShown") { showWelcome() }
+        else { showNotes() }
         return true
+    }
+
+    private func checkPermissionChanges() {
+        let trusted = AXIsProcessTrusted()
+        welcome?.refreshPermission()
+        guard trusted != accessibilityTrusted else { return }
+        accessibilityTrusted = trusted
+        if !trusted {
+            // Invalidate in-flight scans too: a late result must not restore old pins.
+            generation += 1
+            visible = false
+            overlays.hide()
+            scheduledRefresh?.cancel(); scheduledRefresh = nil
+            let engine = self.engine, observation = self.observation
+            queue.async { observation?.stop(); engine.resetTracking() }
+            observedContext = nil
+            rebuildMenu()
+        }
     }
 
     private func installEditingMenu() {
@@ -74,16 +138,18 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         // editing a note in this accessory app.
         let main = NSMenu()
         let application = NSMenuItem(); application.submenu = NSMenu(title: "Stick")
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showShortcutSettings), keyEquivalent: ",")
+        settings.target = self
+        application.submenu?.addItem(settings)
+        application.submenu?.addItem(.separator())
         application.submenu?.addItem(withTitle: "Quit Stick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         main.addItem(application)
         let notes = NSMenuItem(); notes.submenu = NSMenu(title: "Notes")
-        for (title, action, key) in [
-            ("Add note to selection", #selector(addNote), "n"),
-            (visible ? "Hide pins" : "Show pins", #selector(togglePins), "p")
+        for (title, action, shortcut) in [
+            ("Add note to selection", #selector(addNote), shortcuts.addNote),
+            (visible ? "Hide pins" : "Show pins", #selector(togglePins), shortcuts.togglePins)
         ] {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-            item.keyEquivalentModifierMask = [.control, .option]; item.target = self
-            notes.submenu?.addItem(item)
+            notes.submenu?.addItem(shortcutMenuItem(title: title, action: action, shortcut: shortcut))
         }
         let all = NSMenuItem(title: "All Notes…", action: #selector(showNotes), keyEquivalent: "")
         all.target = self; notes.submenu?.addItem(all)
@@ -110,17 +176,25 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     }
     private func targetPID() -> pid_t? { externalApp()?.processIdentifier ?? sourcePID }
 
+    private func shortcutMenuItem(title: String, action: Selector, shortcut: KeyboardShortcut) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: shortcut.menuKeyEquivalent)
+        item.keyEquivalentModifierMask = shortcut.menuModifierMask
+        item.target = self
+        return item
+    }
+
     private func rebuildMenu() {
         let menu = NSMenu()
-        for (title, action, key) in [("Add note to selection", #selector(addNote), "n"), (visible ? "Hide pins" : "Show pins", #selector(togglePins), "p")] {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-            item.keyEquivalentModifierMask = [.control, .option]; item.target = self; menu.addItem(item)
+        for (title, action, shortcut) in [("Add note to selection", #selector(addNote), shortcuts.addNote), (visible ? "Hide pins" : "Show pins", #selector(togglePins), shortcuts.togglePins)] {
+            menu.addItem(shortcutMenuItem(title: title, action: action, shortcut: shortcut))
         }
         menu.addItem(.separator())
         let all = NSMenuItem(title: "All Notes…", action: #selector(showNotes), keyEquivalent: "")
         all.target = self; menu.addItem(all)
         let help = NSMenuItem(title: "Getting Started…", action: #selector(showWelcome), keyEquivalent: "")
         help.target = self; menu.addItem(help)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showShortcutSettings), keyEquivalent: ",")
+        settings.target = self; menu.addItem(settings)
         if pendingReattach != nil {
             let cancel = NSMenuItem(title: "Cancel reattaching note", action: #selector(cancelReattach), keyEquivalent: "")
             cancel.target = self; menu.addItem(cancel)
@@ -128,12 +202,42 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Stick", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp; menu.addItem(quit); status.menu = menu
-        status.button?.toolTip = visible ? "Stick — pins visible" : "Stick — Control–Option–N adds a note"
+        status.button?.toolTip = visible ? "Stick — pins visible" : "Stick — \(shortcuts.addNote.spokenString) adds a note"
         installEditingMenu()
     }
 
+    @objc private func showShortcutSettings() {
+        if shortcutSettings == nil {
+            shortcutSettings = ShortcutSettingsController(configuration: shortcuts, onApply: { [weak self] configuration in
+                guard let self else { return "Stick is no longer available." }
+                return self.applyShortcuts(configuration)
+            })
+        }
+        // Reopening an already visible Settings window should not discard its draft.
+        if shortcutSettings?.window?.isVisible != true {
+            shortcutSettings?.update(configuration: shortcuts, warning: shortcutWarning)
+        }
+        shortcutSettings?.present()
+    }
+
+    private func applyShortcuts(_ configuration: ShortcutConfiguration) -> String? {
+        do {
+            try hotkeys.apply(configuration: configuration)
+            try shortcutPreferences.save(configuration)
+            shortcuts = configuration
+            shortcutWarning = nil
+            rebuildMenu()
+            welcome?.updateShortcuts(configuration)
+            list?.updateShortcut(configuration.addNote)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     private func permissionReady() -> Bool {
-        if AXIsProcessTrusted() { return true }
+        checkPermissionChanges()
+        if accessibilityTrusted { return true }
         logger.notice("Command needs Accessibility permission")
         showWelcome(); return false
     }
@@ -142,11 +246,14 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         guard store != nil, permissionReady(), !capturing, let pid = targetPID() else { return }
         // A user request queues behind an in-flight scan instead of being dropped.
         sourcePID = pid; capturing = true
+        let engine = self.engine
         queue.async { [weak self] in
             guard let self else { return }
-            let result = Result { try AccessibilityEngine().captureSelection(pid: pid) }
+            let result = Result { try engine.captureSelection(pid: pid) }
             DispatchQueue.main.async { [self] in
                 self.capturing = false
+                defer { if self.refreshAgain { self.requestPinRefresh() } }
+                guard self.permissionReady() else { return }
                 switch result {
                 case .failure(let error): self.alert("Select some text first", error.localizedDescription)
                 case .success(let captured):
@@ -156,11 +263,18 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
                         note = old
                         note.appBundleID = c.appBundleID; note.appName = c.appName
                         note.documentID = c.documentID; note.documentTitle = c.documentTitle; note.anchor = captured.anchor
-                        note.updatedAt = Date(); self.pendingReattach = nil; self.unplaced.remove(id)
+                        note.updatedAt = Date()
                     } else {
                         note = StickNote(body: "", appBundleID: c.appBundleID, appName: c.appName, documentID: c.documentID, documentTitle: c.documentTitle, anchor: captured.anchor)
                     }
                     guard self.save(note) else { return }
+                    if self.pendingReattach == note.id {
+                        self.pendingReattach = nil
+                        self.unplaced.remove(note.id)
+                        let reattachedID = note.id
+                        self.queue.async { engine.forgetTracking(noteID: reattachedID) }
+                    }
+                    self.generation += 1
                     self.observedContext = c
                     self.openEditor(note, point: self.cocoaRect(captured.bounds).origin, returnPID: c.pid)
                     self.rebuildMenu()
@@ -172,24 +286,59 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePins() {
         guard permissionReady() else { return }
         visible.toggle(); generation += 1
-        if visible { refreshPins() } else { overlays.hide() }
+        if visible { requestPinRefresh() }
+        else {
+            overlays.hide()
+            scheduledRefresh?.cancel(); scheduledRefresh = nil
+            let observation = self.observation
+            queue.async { observation?.stop() }
+        }
         rebuildMenu()
+    }
+
+    private func requestPinRefresh() {
+        guard visible else { return }
+        if busy || capturing { refreshAgain = true; return }
+        guard scheduledRefresh == nil else { return }
+        let delay = max(0, 0.05 - Date().timeIntervalSince(lastRefresh))
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.scheduledRefresh = nil
+            self.refreshPins()
+        }
+        scheduledRefresh = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func refreshPins() {
         guard visible, !busy, !capturing, AXIsProcessTrusted(), let store, let pid = targetPID() else { return }
-        busy = true
+        busy = true; refreshAgain = false; lastRefresh = Date()
         let notes = store.notes, token = generation
+        let geometryToken = geometryRevision
+        let engine = self.engine, observation = self.observation
         queue.async { [weak self] in
             guard let self else { return }
-            let result = Result { try AccessibilityEngine().resolve(notes: notes, pid: pid) }
+            let result = Result { try engine.resolve(notes: notes, pid: pid) }
+            let anchorUpdates = engine.takeAnchorUpdates()
             DispatchQueue.main.async { [self] in
                 self.busy = false
-                guard self.visible, token == self.generation else { return }
+                defer { if self.refreshAgain { self.requestPinRefresh() } }
+                guard self.visible, token == self.generation, AXIsProcessTrusted() else { return }
                 switch result {
                 case .failure:
                     self.overlays.hide()
                 case .success(let (context, locations)):
+                    do {
+                        try self.store?.updateAnchors(anchorUpdates, expected: Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0.anchor) }))
+                    } catch {
+                        self.logger.error("Could not save updated pin locations: \(error.localizedDescription)")
+                    }
+                    // Never paint coordinates captured before a newer scroll or edit.
+                    guard geometryToken == self.geometryRevision else {
+                        self.overlays.hide()
+                        self.refreshAgain = true
+                        return
+                    }
                     self.observedContext = context
                     var pins: [(id: UUID, rect: CGRect, label: String)] = []
                     for note in notes where note.appBundleID == context.appBundleID && note.documentID == context.documentID {
@@ -206,6 +355,7 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
                     self.list?.update(notes: self.store?.notes ?? [], unplaced: self.unplaced)
                 }
             }
+            observation?.update(pid: pid, elements: engine.observationElements)
         }
     }
 
@@ -224,15 +374,16 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
     }
-    private func delete(_ id: UUID) {
+    @discardableResult private func delete(_ id: UUID) -> Bool {
         do {
             try store?.delete(id: id)
-            if editor?.noteID == id { editor?.close(); editor = nil }
+            if editor?.noteID == id { editor?.discardAndClose(); editor = nil }
             if pendingReattach == id { pendingReattach = nil; rebuildMenu() }
             unplaced.remove(id); list?.update(notes: store?.notes ?? [], unplaced: unplaced)
-            generation += 1; refreshPins()
+            generation += 1; requestPinRefresh()
+            return true
         }
-        catch { alert("Couldn’t delete note", error.localizedDescription) }
+        catch { alert("Couldn’t delete note", error.localizedDescription); return false }
     }
     private func openNote(_ id: UUID) {
         guard let note = store?.notes.first(where: { $0.id == id }) else { return }
@@ -240,8 +391,15 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
         openEditor(note, point: nil, returnPID: returnPID)
     }
     private func openEditor(_ note: StickNote, point: NSPoint?, returnPID: pid_t?) {
+        guard editor?.flushChanges() != false else { return }
         editor?.close()
-        editor = NoteEditorController(note: note, onChange: { [weak self] in _ = self?.save($0) }, onDelete: { [weak self] in self?.delete($0) }, onClose: {
+        // Reopening the same note after a pending save uses its latest body.
+        let currentNote = store?.notes.first(where: { $0.id == note.id }) ?? note
+        editor = NoteEditorController(note: currentNote, onChange: { [weak self] edited in
+            guard let self, var latest = self.store?.notes.first(where: { $0.id == edited.id }) else { return false }
+            latest.body = edited.body; latest.updatedAt = edited.updatedAt
+            return self.save(latest)
+        }, onDelete: { [weak self] in self?.delete($0) ?? false }, onClose: {
             // Returning to work belongs to this editor's source, even if another
             // app becomes active while the note remains open.
             guard let returnPID, let sourceApp = NSRunningApplication(processIdentifier: returnPID),
@@ -256,9 +414,9 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
             list = NotesListController(onOpen: { [weak self] in self?.openNote($0) }, onReveal: { [weak self] in self?.openSource($0) }, onReattach: { [weak self] id in
                 guard let self else { return }
                 self.pendingReattach = id; self.rebuildMenu(); self.list?.close()
-                self.alert("Choose a new location", "Select the text you want to attach this note to, then press Control–Option–N. Your note will keep its existing text.")
+                self.alert("Choose a new location", "Select the text you want to attach this note to, then press \(self.shortcuts.addNote.spokenString). Your note will keep its existing text.")
                 if let pid = self.sourcePID { NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps]) }
-            }, onDelete: { [weak self] in self?.delete($0) })
+            }, onDelete: { [weak self] in self?.delete($0) }, addNoteShortcut: shortcuts.addNote)
         }
         list?.update(notes: store?.notes ?? [], unplaced: unplaced); list?.present()
     }
@@ -279,29 +437,20 @@ final class StickAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func cancelReattach() { pendingReattach = nil; rebuildMenu() }
 
     @objc private func showWelcome() {
-        if let welcome { welcome.showWindow(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 430, height: 350), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        panel.title = "Welcome to Stick"; panel.isReleasedWhenClosed = false
-        let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 18; stack.translatesAutoresizingMaskIntoConstraints = false
-        let title = NSTextField(labelWithString: "Leave a thought where it belongs.")
-        title.font = .systemFont(ofSize: 22, weight: .semibold)
-        let copy = NSTextField(wrappingLabelWithString: "Select text in your document, then press Control–Option–N to add a note.\n\nControl–Option–P reveals or hides the pins in your current document. Click a pin to open its note. Escape returns you to work.\n\nStick uses Accessibility to locate your selections. Notes stay on this Mac.")
-        copy.font = .systemFont(ofSize: 14)
-        let settings = NSButton(title: "Open Accessibility Settings", target: self, action: #selector(openAccessibilitySettings))
-        settings.bezelStyle = .rounded
-        let done = NSButton(title: "Get Started", target: self, action: #selector(dismissWelcome)); done.bezelStyle = .rounded; done.keyEquivalent = "\r"
-        [title, copy, settings, done].forEach(stack.addArrangedSubview)
-        panel.contentView!.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor, constant: -24), stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 24)])
-        welcome = NSWindowController(window: panel); panel.center(); welcome?.showWindow(nil); NSApp.activate(ignoringOtherApps: true)
-    }
-    @objc private func openAccessibilitySettings() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
-    }
-    @objc private func dismissWelcome() {
-        UserDefaults.standard.set(true, forKey: "welcomeShown"); welcome?.close()
+        if welcome?.window?.isVisible != true {
+            let app = externalApp() ?? sourcePID.flatMap { NSRunningApplication(processIdentifier: $0) }
+            onboardingReturnPID = app?.bundleIdentifier == "com.apple.systempreferences" ? nil : app?.processIdentifier
+        }
+        if welcome == nil {
+            welcome = OnboardingController(configuration: shortcuts, onFinish: { [weak self] in
+                guard let self, AXIsProcessTrusted() else { return }
+                UserDefaults.standard.set(true, forKey: "welcomeShown")
+                if let pid = self.onboardingReturnPID, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated {
+                    app.activate(options: [.activateIgnoringOtherApps])
+                } else { self.showNotes() }
+            }, onShowNotes: { [weak self] in self?.showNotes() })
+        }
+        welcome?.present()
     }
     private func alert(_ title: String, _ message: String) {
         let alert = NSAlert(); alert.messageText = title; alert.informativeText = message; alert.addButton(withTitle: "OK")

@@ -40,10 +40,33 @@ enum AccessibilityFailure: LocalizedError {
     }
 }
 
-/// Call from one serial worker queue. No clipboard, keyboard injection, or settings mutations.
-final class AccessibilityEngine {
+/// All access, including properties and reset/drain methods, must use one serial
+/// worker queue. Sendability allows that queue to retain the engine; it does not
+/// permit concurrent calls. No clipboard, keyboard injection, or settings mutations.
+final class AccessibilityEngine: @unchecked Sendable {
     private var deadline = Date.distantFuture
     private var exhausted = false
+    private(set) var observationElements: [AXUIElement] = []
+    private var attributeCache: [AttributeKey: CachedAttribute] = [:]
+    private var boundsCache: [BoundsKey: CachedBounds] = [:]
+    private var tracked: [UUID: TrackedAnchor] = [:]
+    private var trackingSession: Session?
+    private var anchorUpdates: [UUID: TextAnchor] = [:]
+
+    private struct ElementKey: Hashable {
+        let element: AXUIElement
+        static func == (lhs: Self, rhs: Self) -> Bool { CFEqual(lhs.element, rhs.element) }
+        func hash(into hasher: inout Hasher) { hasher.combine(CFHash(element)) }
+    }
+    private struct AttributeKey: Hashable { let element: ElementKey; let attribute: String }
+    private struct CachedAttribute { let value: CFTypeRef? }
+    private struct BoundsKey: Hashable { let element: ElementKey; let range: NSRange }
+    private struct CachedBounds { let value: CGRect? }
+    private struct TrackedAnchor {
+        let inputAnchor: TextAnchor
+        let element: AXUIElement
+        var state: LiveAnchorTracker
+    }
 
     private struct Session {
         let app: AXUIElement
@@ -62,6 +85,25 @@ final class AccessibilityEngine {
         let node: Int
         let range: NSRange
         let rect: CGRect?
+    }
+
+    /// Drain on the same worker queue as resolve. Persist only when the note's
+    /// saved anchor still equals the input used for that resolve operation.
+    func takeAnchorUpdates() -> [UUID: TextAnchor] {
+        defer { anchorUpdates.removeAll(keepingCapacity: true) }
+        return anchorUpdates
+    }
+
+    func resetTracking() {
+        tracked.removeAll(keepingCapacity: true)
+        trackingSession = nil
+        anchorUpdates.removeAll(keepingCapacity: true)
+        observationElements.removeAll(keepingCapacity: true)
+    }
+
+    func forgetTracking(noteID: UUID) {
+        tracked.removeValue(forKey: noteID)
+        anchorUpdates.removeValue(forKey: noteID)
     }
 
     func currentContext(pid: pid_t) throws -> DocumentContext {
@@ -151,36 +193,88 @@ final class AccessibilityEngine {
     func resolve(notes: [StickNote], pid: pid_t) throws -> (DocumentContext, [UUID: PinLocation]) {
         startScan()
         let session = try session(pid: pid)
+        if let previous = trackingSession,
+           previous.context.pid != pid || previous.context.documentID != session.context.documentID
+            || previous.context.appBundleID != session.context.appBundleID || !CFEqual(previous.content, session.content) {
+            tracked = tracked.filter { $0.value.state.isInvalidated }
+        }
+        trackingSession = session
         let relevant = notes.filter { $0.appBundleID == session.context.appBundleID && $0.documentID == session.context.documentID }
         guard !relevant.isEmpty else { return (session.context, [:]) }
         let nodes = textNodes(session)
         var results = [UUID: PinLocation]()
+        let existingNoteIDs = Set(notes.map(\.id))
+        var nextTracked = tracked.filter { $0.value.state.isInvalidated && existingNoteIDs.contains($0.key) }
+        var updates = [UUID: TextAnchor]()
+        var edits = [ElementKey: (text: String, change: TextEditTracker)]()
         for note in relevant {
             var candidates = [Located]()
             var hasAmbiguity = false
-            for (index, node) in nodes.enumerated() {
-                switch AnchorMatcher.locate(note.anchor, in: node.text) {
-                case .found(let found): candidates.append(Located(node: index, range: found, rect: bounds(node.element, range: found)))
-                case .ambiguous: hasAmbiguity = true
-                case .missing: break
+            // A known AX element and an observed edit provide stronger identity
+            // than searching the document anew on every scroll or keystroke.
+            var observedInvalidation = false
+            if var previous = tracked[note.id], previous.inputAnchor.hasSameAttachment(as: note.anchor)
+                || previous.state.anchor.hasSameAttachment(as: note.anchor) {
+                if let index = nodes.firstIndex(where: { CFEqual($0.element, previous.element) }) {
+                    let key = ElementKey(element: previous.element)
+                    if edits[key]?.text != previous.state.text {
+                        edits[key] = (previous.state.text, TextEditTracker(from: previous.state.text, to: nodes[index].text))
+                    }
+                    if let edit = edits[key]?.change, let shifted = previous.state.apply(edit) {
+                        candidates = [Located(node: index, range: shifted, rect: bounds(nodes[index].element, range: shifted))]
+                    }
                 }
+                if previous.state.isInvalidated {
+                    observedInvalidation = true
+                    nextTracked[note.id] = previous
+                    var invalidated = note.anchor
+                    invalidated.requiresReattachment = true
+                    if invalidated != note.anchor { updates[note.id] = invalidated }
+                }
+            } else {
+                // A new anchor represents an explicit attachment chosen by the user.
+                nextTracked.removeValue(forKey: note.id)
             }
-            candidates = coalesce(candidates, nodes: nodes)
+            if candidates.isEmpty && !observedInvalidation {
+                for (index, node) in nodes.enumerated() {
+                    switch AnchorMatcher.locate(note.anchor, in: node.text) {
+                    case .found(let found): candidates.append(Located(node: index, range: found, rect: bounds(node.element, range: found)))
+                    case .ambiguous: hasAmbiguity = true
+                    case .missing: break
+                    }
+                }
+                candidates = coalesce(candidates, nodes: nodes)
+            }
             if hasAmbiguity || candidates.count > 1 { results[note.id] = .ambiguous }
             else if let candidate = candidates.first {
+                let node = nodes[candidate.node]
+                if let state = LiveAnchorTracker(anchor: note.anchor, text: node.text, range: candidate.range) {
+                    nextTracked[note.id] = TrackedAnchor(inputAnchor: note.anchor, element: node.element, state: state)
+                    if state.anchor != note.anchor { updates[note.id] = state.anchor }
+                }
                 if let rect = candidate.rect {
                     let clipped = rect.intersection(nodes[candidate.node].clip)
-                    results[note.id] = clipped.isNull || clipped.isEmpty ? .offscreen : .visible(clipped)
+                    // Keep pins in the editor gutter while the first glyph gives
+                    // the exact line height. Indenting text must not move the gutter.
+                    results[note.id] = clipped.isNull || clipped.isEmpty ? .offscreen : .visible(
+                        CGRect(x: node.clip.minX + 10, y: clipped.minY, width: clipped.width, height: clipped.height)
+                    )
                 } else { results[note.id] = .offscreen }
             } else { results[note.id] = .missing }
         }
         if exhausted { throw AccessibilityFailure.scanIncomplete }
+        tracked = nextTracked
+        anchorUpdates = updates
         return (session.context, results)
     }
 
     private func startScan() {
         deadline = Date().addingTimeInterval(1.3)
         exhausted = false
+        attributeCache.removeAll(keepingCapacity: true)
+        boundsCache.removeAll(keepingCapacity: true)
+        observationElements.removeAll(keepingCapacity: true)
+        anchorUpdates.removeAll(keepingCapacity: true)
     }
     private func allowed() -> Bool {
         if Date() >= deadline { exhausted = true; return false }
@@ -224,6 +318,7 @@ final class AccessibilityEngine {
             }
             content = editor
         }
+        observationElements = [app, window, content]
         return Session(app: app, window: window, content: content, context: context, browser: isBrowserPage)
     }
 
@@ -271,9 +366,8 @@ final class AccessibilityEngine {
             var nextAncestor = ancestor
             if ["AXTextArea", "AXStaticText", "AXTextField"].contains(role),
                let text = read(node, "AXValue") as? String, !text.isEmpty, (text as NSString).length <= 2_000_000 {
-                let ownFrame = frame(node)
                 // Exclude offscreen live announcers, but retain ordinary offscreen document text.
-                if role != "AXStaticText" || ownFrame.map({ $0.width > 1 && $0.height > 0 }) != false {
+                if role != "AXStaticText" || frame(node).map({ $0.width > 1 && $0.height > 0 }) != false {
                     output.append(TextNode(element: node, text: text, clip: nextClip, ancestorText: ancestor))
                     nextAncestor = output.count - 1
                 }
@@ -289,10 +383,10 @@ final class AccessibilityEngine {
         for _ in 0..<24 {
             guard let current = parent, !CFEqual(current, session.window), allowed() else { break }
             let role = read(current, "AXRole") as? String ?? ""
-            if let viewport = frame(current) {
-                if role == "AXScrollArea" || (role == "AXGroup" && viewport.width >= 80 && viewport.height >= 80) {
-                    contentClip = contentClip.intersection(viewport)
-                }
+            if (role == "AXScrollArea" || role == "AXGroup"), let viewport = frame(current),
+               role == "AXScrollArea" || (viewport.width >= 80 && viewport.height >= 80) {
+                contentClip = contentClip.intersection(viewport)
+                observationElements.append(current)
             }
             parent = element(read(current, "AXParent"))
         }
@@ -338,10 +432,14 @@ final class AccessibilityEngine {
     }
     private func read(_ node: AXUIElement, _ attribute: String) -> CFTypeRef? {
         guard allowed() else { return nil }
+        let key = AttributeKey(element: ElementKey(element: node), attribute: attribute)
+        if let cached = attributeCache[key] { return cached.value }
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(node, attribute as CFString, &value)
         if result == .cannotComplete || result == .invalidUIElement || result == .failure { exhausted = true }
-        return result == .success ? value : nil
+        let resolved = result == .success ? value : nil
+        attributeCache[key] = CachedAttribute(value: resolved)
+        return resolved
     }
     private func parameter(_ node: AXUIElement, _ name: String, _ input: CFTypeRef) -> CFTypeRef? {
         guard allowed() else { return nil }
@@ -388,8 +486,16 @@ final class AccessibilityEngine {
     }
     private func bounds(_ node: AXUIElement, range: NSRange) -> CGRect? {
         // A pin marks the start of a passage. Large multiline union rectangles obscure its position.
-        var small = CFRange(location: range.location, length: min(range.length, 1))
+        let key = BoundsKey(element: ElementKey(element: node), range: range)
+        if let cached = boundsCache[key] { return cached.value }
+        var length = min(range.length, 1)
+        if let text = read(node, "AXValue") as? String, range.location < (text as NSString).length {
+            length = min(range.length, (text as NSString).rangeOfComposedCharacterSequence(at: range.location).length)
+        }
+        var small = CFRange(location: range.location, length: length)
         guard let input = AXValueCreate(.cfRange, &small) else { return nil }
-        return rectangle(parameter(node, "AXBoundsForRange", input))
+        let rect = rectangle(parameter(node, "AXBoundsForRange", input))
+        boundsCache[key] = CachedBounds(value: rect)
+        return rect
     }
 }
